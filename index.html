@@ -633,29 +633,8 @@
     </style>
   </head>
   <body>
-    <!-- Login Overlay -->
-    <div id="loginOverlay">
-      <div class="login-box">
-        <h2>🔐 DBA Assistant</h2>
-        <p>Sign in to continue</p>
-        <input
-          type="text"
-          id="loginUsername"
-          placeholder="Username"
-          autocomplete="username"
-        />
-        <input
-          type="password"
-          id="loginPassword"
-          placeholder="Password"
-          autocomplete="current-password"
-          onkeydown="if (event.key === 'Enter') doLogin();"
-        />
-        <button onclick="doLogin()">Sign In</button>
-        <div id="loginError"></div>
-      </div>
-    </div>
-
+    <!-- Login handled server-side via MSAL (/login); overlay removed -->
+     
     <div class="container">
       <div class="header">
         <h1>🤖 AI powered DBA assistant</h1>
@@ -2134,26 +2113,169 @@
     </div>
 
     <script>
-      const API_BASE = "http://localhost:8000/api";
+      // Determine API base dynamically: If on 8443 (UI), look for API on 8000
+      const currentOrigin = window.location.origin;
+      const API_BASE = currentOrigin.includes(":8443") 
+        ? currentOrigin.replace(":8443", ":8000") + "/api"
+        : currentOrigin + "/api";
 
       /* ── Global fetch wrapper: intercept 401 and show login ── */
       const _originalFetch = window.fetch.bind(window);
       window.fetch = async function (...args) {
-        const response = await _originalFetch(...args);
-        if (response.status === 401) {
-          // Avoid intercepting the login call itself
-          const url =
-            (typeof args[0] === "string" ? args[0] : args[0]?.url) || "";
-          if (!url.includes("/api/login")) {
-            sessionStorage.removeItem("session_token");
-            clearConnectedState();
-            document.getElementById("loginError").textContent =
-              "Your session has expired. Please sign in again.";
-            document.getElementById("loginOverlay").classList.remove("hidden");
+        const url = (args[0] instanceof Request) ? args[0].url : args[0];
+
+        // Use credentials (cookies) for all local API calls
+        if (typeof url === 'string' && url.includes("/api")) {
+          if (args[0] instanceof Request) {
+            // Cannot easily modify Request object, so callers that pass a Request
+            // should set `credentials` themselves.
+          } else {
+            args[1] = args[1] || {};
+            args[1].credentials = args[1].credentials || "include";
           }
         }
-        return response;
+
+        try {
+          const response = await _originalFetch(...args);
+          if (response.status === 401) {
+            // Avoid intercepting the login call itself
+            const reqUrl = (typeof args[0] === "string" ? args[0] : args[0]?.url) || "";
+            if (!reqUrl.includes("/api/login")) {
+              sessionStorage.removeItem("session_token");
+              clearConnectedState();
+              setLoginError("Your session has expired. Please sign in again.");
+              showLoginOverlay();
+            }
+          }
+          return response;
+        } catch (err) {
+          console.error("Fetch failure:", err);
+          throw err;
+        }
       };
+
+      /* Helper: show/hide login overlay (or redirect to MSAL login) */
+      function showLoginOverlay() {
+        const overlay = document.getElementById("loginOverlay");
+        if (overlay) {
+          overlay.classList.remove("hidden");
+        } else {
+          // No client-side overlay exists; redirect to server-side MSAL login
+          window.location.href = window.location.origin + "/login";
+        }
+      }
+
+      function hideLoginOverlay() {
+        const overlay = document.getElementById("loginOverlay");
+        if (overlay) overlay.classList.add("hidden");
+      }
+
+      function setLoginError(msg) {
+        const el = document.getElementById("loginError");
+        if (el) el.textContent = msg;
+      }
+      // ------------------ Debug console (floating) ------------------
+      function ensureDebugPanel() {
+        if (window._debugPanelInitialized) return;
+        window._debugPanelInitialized = true;
+        try {
+          const btn = document.createElement("button");
+          btn.id = "debugToggleBtn";
+          btn.textContent = "🐞";
+          btn.title = "Toggle debug console";
+          Object.assign(btn.style, {
+            position: "fixed",
+            right: "12px",
+            bottom: "12px",
+            zIndex: 99999,
+            padding: "6px 8px",
+            borderRadius: "6px",
+            background: "#111",
+            color: "#fff",
+            border: "none",
+            cursor: "pointer",
+          });
+          const panel = document.createElement("div");
+          panel.id = "debugConsole";
+          Object.assign(panel.style, {
+            position: "fixed",
+            right: "12px",
+            bottom: "60px",
+            zIndex: 99999,
+            width: "480px",
+            height: "300px",
+            overflow: "auto",
+            background: "#0b1220",
+            color: "#c7d2fe",
+            padding: "8px",
+            borderRadius: "6px",
+            display: "none",
+            fontFamily: "monospace",
+            fontSize: "12px",
+            whiteSpace: "pre-wrap",
+            boxShadow: "0 6px 20px rgba(2,6,23,0.6)",
+          });
+
+          const controls = document.createElement("div");
+          controls.style = "display:flex;gap:6px;margin-bottom:6px;";
+          const fetchBtn = document.createElement("button");
+          fetchBtn.textContent = "Fetch server logs";
+          fetchBtn.onclick = fetchServerLogs;
+          const clearBtn = document.createElement("button");
+          clearBtn.textContent = "Clear";
+          clearBtn.onclick = () => {
+            const c = document.getElementById("debugConsoleContent");
+            if (c) c.textContent = "";
+          };
+          controls.appendChild(fetchBtn);
+          controls.appendChild(clearBtn);
+          panel.appendChild(controls);
+
+          const content = document.createElement("div");
+          content.id = "debugConsoleContent";
+          panel.appendChild(content);
+
+          document.body.appendChild(panel);
+          document.body.appendChild(btn);
+          btn.addEventListener("click", () => {
+            if (panel.style.display === "none") {
+              panel.style.display = "block";
+              fetchServerLogs();
+            } else panel.style.display = "none";
+          });
+        } catch (e) {
+          console.error("Failed to init debug panel:", e);
+        }
+      }
+
+      function logDebug(msg) {
+        try {
+          ensureDebugPanel();
+          const el = document.getElementById("debugConsoleContent");
+          if (!el) return;
+          const ts = new Date().toISOString();
+          el.textContent += `[${ts}] ${msg}\n`;
+          el.parentElement.scrollTop = el.parentElement.scrollHeight;
+        } catch (e) {
+          console.error("logDebug failed:", e);
+        }
+      }
+
+      async function fetchServerLogs() {
+        try {
+          const resp = await fetch("/_debug/app-log", { credentials: "include" });
+          if (!resp.ok) {
+            logDebug(`Failed to fetch app log: ${resp.status} ${resp.statusText}`);
+            return;
+          }
+          const txt = await resp.text();
+          const el = document.getElementById("debugConsoleContent");
+          if (el) el.textContent = txt;
+        } catch (e) {
+          logDebug(`Error fetching app log: ${e.message}`);
+        }
+      }
+      // ---------------- end debug console ----------------
       let currentConnection = null;
 
       /* ── Example questions per DB type ── */
@@ -2202,19 +2324,20 @@
        */
       function handleSessionExpired(response) {
         if (response.status === 401) {
-          document.getElementById("loginOverlay").classList.remove("hidden");
+          showLoginOverlay();
           return true;
         }
         return false;
       }
 
       async function doLogin() {
-        const username = document.getElementById("loginUsername").value.trim();
-        const password = document.getElementById("loginPassword").value;
-        document.getElementById("loginError").textContent = "";
+        const usernameEl = document.getElementById("loginUsername");
+        const passwordEl = document.getElementById("loginPassword");
+        const username = usernameEl ? usernameEl.value.trim() : "";
+        const password = passwordEl ? passwordEl.value : "";
+        setLoginError("");
         if (!username || !password) {
-          document.getElementById("loginError").textContent =
-            "Please enter username and password.";
+          setLoginError("Please enter username and password.");
           return;
         }
         try {
@@ -2226,7 +2349,7 @@
           const data = await resp.json();
           if (resp.ok) {
             sessionStorage.setItem("session_token", data.session_token);
-            document.getElementById("loginOverlay").classList.add("hidden");
+            hideLoginOverlay();
             // Clear any stale auth-error messages left on panels
             ["recStatus", "queryStatus", "connStatus"].forEach((id) => {
               const el = document.getElementById(id);
@@ -2237,12 +2360,10 @@
             });
             loadProfiles();
           } else {
-            document.getElementById("loginError").textContent =
-              data.detail || "Login failed";
+            setLoginError(data.detail || "Login failed");
           }
         } catch (e) {
-          document.getElementById("loginError").textContent =
-            "Server unreachable. Is the server running?";
+          setLoginError("Server unreachable. Is the server running?");
         }
       }
 
@@ -2251,15 +2372,16 @@
         if (token) {
           await fetch(`${API_BASE}/logout`, {
             method: "POST",
-            headers: { "x-api-key": token },
           }).catch(() => {});
         }
         sessionStorage.removeItem("session_token");
         clearConnectedState();
-        document.getElementById("loginUsername").value = "";
-        document.getElementById("loginPassword").value = "";
-        document.getElementById("loginError").textContent = "";
-        document.getElementById("loginOverlay").classList.remove("hidden");
+        const lu = document.getElementById("loginUsername");
+        if (lu) lu.value = "";
+        const lp = document.getElementById("loginPassword");
+        if (lp) lp.value = "";
+        setLoginError("");
+        showLoginOverlay();
       }
 
       /* ── Connection tab switcher (Saved Profiles / Manual Connect) ── */
@@ -2460,14 +2582,13 @@
 
       async function disconnectDatabase() {
         if (!currentConnection) return;
-        const keys = getAPIKeys();
+        
         try {
           await fetch(
             `${API_BASE}/database/${encodeURIComponent(currentConnection)}/disconnect`,
             {
               method: "DELETE",
               headers: {
-                "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
               },
             },
           );
@@ -2483,8 +2604,10 @@
       }
 
       async function connectDatabase() {
-        const useSshTunnel =
-          document.getElementById("sshTunnelCheck")?.checked || false;
+        // SSH tunnels temporarily disabled. Force false to avoid client-side attempts.
+        const useSshTunnel = false; // SSH tunnels disabled for debugging
+        // Ensure debug panel exists (user can toggle it)
+        ensureDebugPanel();
         const dbType = document.getElementById("databaseType").value;
         const data = {
           database_type: dbType,
@@ -2495,24 +2618,13 @@
           password: document.getElementById("password").value,
           connection_id: document.getElementById("connectionId").value || null,
           use_sid: document.getElementById("sidTypeSid")?.checked || false,
-          use_ssh_tunnel: useSshTunnel,
-          ssh_jump_host:
-            document.getElementById("sshJumpHost")?.value?.trim() || null,
-          ssh_jump_user:
-            document.getElementById("sshJumpUser")?.value?.trim() || null,
-          ssh_jump_port: parseInt(
-            document.getElementById("sshJumpPort")?.value || "22",
-          ),
-          ssh_remote_host:
-            document.getElementById("sshRemoteHost")?.value?.trim() || null,
-          ssh_remote_port: parseInt(
-            document.getElementById("sshRemotePort")?.value ||
-              document.getElementById("port").value ||
-              "1521",
-          ),
-          ssh_local_port: document.getElementById("sshLocalPort")?.value
-            ? parseInt(document.getElementById("sshLocalPort").value)
-            : null,
+          use_ssh_tunnel: false,
+          ssh_jump_host: null,
+          ssh_jump_user: null,
+          ssh_jump_port: 22,
+          ssh_remote_host: null,
+          ssh_remote_port: null,
+          ssh_local_port: null,
         };
 
         if (
@@ -2528,18 +2640,6 @@
           );
           return;
         }
-        if (
-          data.database_type === "oracle" &&
-          useSshTunnel &&
-          (!data.ssh_jump_host || !data.ssh_jump_user)
-        ) {
-          showStatus(
-            "connectStatus",
-            "error",
-            "❌ SSH jump host and SSH jump user are required when SSH tunnel is enabled",
-          );
-          return;
-        }
 
         const connectBtn = document.getElementById("connectBtn");
         connectBtn.disabled = true;
@@ -2547,23 +2647,25 @@
         showStatus(
           "connectStatus",
           "info",
-          useSshTunnel
-            ? "⏳ Opening SSH tunnel and connecting to database, please wait..."
-            : "⏳ Connecting to database, please wait...",
+          "⏳ Connecting to database, please wait...",
         );
 
         try {
-          const keys = getAPIKeys();
           const response = await fetch(`${API_BASE}/connect`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
             },
             body: JSON.stringify(data),
           });
 
-          const result = await response.json();
+          const responseText = await response.text();
+          let result = {};
+          try {
+            result = JSON.parse(responseText || "{}");
+          } catch (e) {
+            result = { detail: responseText };
+          }
 
           if (handleSessionExpired(response)) {
             showStatus(
@@ -2604,7 +2706,13 @@
             // Health collection is intentionally asynchronous after connect.
             refreshHealthReport();
           } else {
-            showStatus("connectStatus", "error", `❌ ${result.detail}`);
+            const detail = result.detail || response.statusText || responseText || "Unknown error";
+            showStatus("connectStatus", "error", `❌ ${detail}`);
+            // Provide raw detail in debug console and fetch server logs for 5xx errors
+            logDebug(`Connect failed: ${response.status} ${response.statusText}\n${responseText}`);
+            if (response.status >= 500) {
+              fetchServerLogs();
+            }
           }
         } catch (error) {
           showStatus(
@@ -2612,6 +2720,8 @@
             "error",
             `❌ Connection error: ${error.message}`,
           );
+          logDebug(`Network error during connect: ${error.message}`);
+          fetchServerLogs();
         } finally {
           connectBtn.disabled = false;
           connectBtn.textContent = "🔗 Connect to Database";
@@ -2651,12 +2761,11 @@
         showLoading("queryLoading", true);
 
         try {
-          const keys = getAPIKeys();
+          
           const response = await fetch(`${API_BASE}/query`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
             },
             body: JSON.stringify({
               query: query,
@@ -2709,13 +2818,12 @@
         showLoading("healthLoading", true);
 
         try {
-          const keys = getAPIKeys();
+          
           const encodedConnection = encodeURIComponent(currentConnection);
           const response = await fetch(
             `${API_BASE}/database/${encodedConnection}/health`,
             {
               headers: {
-                "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
               },
             },
           );
@@ -2762,7 +2870,7 @@
         document.getElementById("recActionBar").classList.remove("show");
 
         try {
-          const keys = getAPIKeys();
+          
           const encodedConnection = encodeURIComponent(currentConnection);
           const windowMode =
             document.getElementById("recLookback")?.value || "0";
@@ -2800,7 +2908,6 @@
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-                "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
               },
               body: JSON.stringify({
                 lookback_hours: lookbackHours,
@@ -3316,14 +3423,13 @@
           alert("No active connection.");
           return;
         }
-        const keys = getAPIKeys();
+        
         const encodedConnection = encodeURIComponent(currentConnection);
         try {
           const resp = await fetch(
             `${API_BASE}/database/${encodedConnection}/recommendations/download?fmt=txt`,
             {
               headers: {
-                "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
               },
             },
           );
@@ -3412,14 +3518,13 @@
 
       async function refreshHealthReport() {
         if (!currentConnection) return;
-        const keys = getAPIKeys();
+        
         const encoded = encodeURIComponent(currentConnection);
         try {
           const resp = await fetch(
             `${API_BASE}/database/${encoded}/health-report?refresh=true`,
             {
               headers: {
-                "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
               },
             },
           );
@@ -3450,20 +3555,18 @@
         }
       }
 
-      // AI insights are powered solely by AT&T AskATT — no client-side LLM keys.
-      function getAPIKeys() {
-        return {
-          api_key: getSessionToken(),
-        };
-      }
 
-      // On page load: show login if not authenticated, else load profiles
+
+      // On page load: load profiles directly (auth handled by server)
       window.addEventListener("load", () => {
-        if (getSessionToken()) {
-          document.getElementById("loginOverlay").classList.add("hidden");
-          loadProfiles();
-        }
-        // Otherwise the login overlay stays visible (default)
+        loadProfiles();
+        // Hide SSH-related UI while SSH tunnel support is disabled
+        const sshToggleRow = document.getElementById("sshTunnelToggleRow");
+        if (sshToggleRow) sshToggleRow.style.display = "none";
+        const sshFields = document.getElementById("sshTunnelFields");
+        if (sshFields) sshFields.style.display = "none";
+        // Initialize debug panel
+        ensureDebugPanel();
       });
 
       // ================================================================
@@ -3490,10 +3593,9 @@
       }
 
       function _tsHeaders() {
-        const keys = getAPIKeys();
+        
         return {
           "Content-Type": "application/json",
-          "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
         };
       }
 
@@ -4036,7 +4138,7 @@
         // Execution stats
         const stats = d.execution_stats || [];
         if (stats.length) {
-          html += '<h4 style="margin:14px 0 6px;">📊 Execution Statistics</h4>';
+          html += '<h4 style="margin:14px 0 6px;">📊 Current Execution Statistics (v$sql)</h4>';
           html +=
             '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:12px;"><thead><tr>';
           html +=
@@ -4096,13 +4198,20 @@
             html += `<div style="margin:8px 0; padding:8px 12px; background:#fef3c7; border:1px solid #fbbf24; border-radius:6px; font-size:12px;">${issues.join("<br>")}</div>`;
             summary += "Issues: " + issues.join(", ") + "\n";
           }
+        } else {
+          html += '<h4 style="margin:14px 0 6px;">📊 Current Execution Statistics (v$sql)</h4>';
+          html +=
+            '<div style="padding:10px 14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-size:12px; color:#64748b;">' +
+            "sqlid is not present in v$sql" +
+            "</div>";
+          summary += "Current execution statistics: sqlid is not present in v$sql\n";
         }
 
         // Daily execution history from AWR root snapshot/stat views
         const daily = d.execution_history_daily || [];
         if (daily.length) {
           html +=
-            '<h4 style="margin:14px 0 6px;">🗓️ Daily Historical Execution Statistics</h4>';
+            '<h4 style="margin:14px 0 6px;">🗓️ Historical Execution Statistics (AWR)</h4>';
           html +=
             '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:12px;"><thead><tr>';
           html +=
@@ -4159,7 +4268,7 @@
           summary += `Daily history rows: ${daily.length}\n`;
         } else {
           html +=
-            '<h4 style="margin:14px 0 6px;">🗓️ Daily Historical Execution Statistics</h4>';
+            '<h4 style="margin:14px 0 6px;">🗓️ Historical Execution Statistics (AWR)</h4>';
           html +=
             '<div style="padding:10px 14px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; font-size:12px; color:#64748b;">' +
             'No daily execution history available in AWR. The SQL ID may be new, aged out of AWR snapshots, ' +
@@ -4521,6 +4630,8 @@
             html +=
               '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:11px;"><thead><tr>';
             html +=
+              '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Owner</th>';
+            html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Table</th>';
             html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc; text-align:right;">Num Rows</th>';
@@ -4540,6 +4651,7 @@
                   ? "color:#dc2626; font-weight:bold;"
                   : "";
               html += "<tr>";
+              html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(t, "owner") || _g(t, "OWNER") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(t, "table_name") || _g(t, "TABLE_NAME") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0; text-align:right;">${escapeHtml(String(_g(t, "num_rows") || _g(t, "NUM_ROWS") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0; text-align:right;">${escapeHtml(String(_g(t, "blocks") || _g(t, "BLOCKS") || "-"))}</td>`;
@@ -4554,11 +4666,15 @@
           // Column Stats
           if (colStats.length) {
             html +=
-              '<details style="margin:6px 0;"><summary style="cursor:pointer; font-weight:600; font-size:12px; color:#1e40af;">Column Statistics (' +
+              '<details style="margin:6px 0;"><summary style="cursor:pointer; font-weight:600; font-size:12px; color:#1e40af;">Table Column Statistics (' +
               colStats.length +
-              " predicate columns)</summary>";
+              ")</summary>";
             html +=
               '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:11px;"><thead><tr>';
+            html +=
+              '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Owner</th>';
+            html +=
+              '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Table</th>';
             html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Column</th>';
             html +=
@@ -4581,6 +4697,8 @@
                   ? "color:#9ca3af;"
                   : "color:#059669; font-weight:bold;";
               html += "<tr>";
+              html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(c, "owner") || _g(c, "OWNER") || "-"))}</td>`;
+              html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(c, "table_name") || _g(c, "TABLE_NAME") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(c, "column_name") || _g(c, "COLUMN_NAME") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0; text-align:right;">${escapeHtml(String(_g(c, "num_distinct") || _g(c, "NUM_DISTINCT") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0; text-align:right;">${escapeHtml(String(_g(c, "density") || _g(c, "DENSITY") || "-"))}</td>`;
@@ -4601,6 +4719,10 @@
             html +=
               '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:11px;"><thead><tr>';
             html +=
+              '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Owner</th>';
+            html +=
+              '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Table</th>';
+            html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Index</th>';
             html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Columns</th>';
@@ -4617,6 +4739,8 @@
             html += "</tr></thead><tbody>";
             idxStats.forEach((ix) => {
               html += "<tr>";
+              html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(ix, "owner") || _g(ix, "OWNER") || "-"))}</td>`;
+              html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(ix, "table_name") || _g(ix, "TABLE_NAME") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(ix, "index_name") || _g(ix, "INDEX_NAME") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(ix, "index_columns") || _g(ix, "INDEX_COLUMNS") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0; text-align:right;">${escapeHtml(String(_g(ix, "distinct_keys") || _g(ix, "DISTINCT_KEYS") || "-"))}</td>`;
@@ -4637,6 +4761,8 @@
             html +=
               '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:11px;"><thead><tr>';
             html +=
+              '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Owner</th>';
+            html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Table</th>';
             html +=
               '<th style="padding:5px 6px; border:1px solid #e2e8f0; background:#f8fafc;">Partition</th>';
@@ -4651,6 +4777,7 @@
             html += "</tr></thead><tbody>";
             tblPartStats.slice(0, 250).forEach((tp) => {
               html += "<tr>";
+              html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(tp, "owner") || _g(tp, "OWNER") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(tp, "table_name") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(tp, "partition_name") || "-"))}</td>`;
               html += `<td style="padding:4px 6px; border:1px solid #e2e8f0;">${escapeHtml(String(_g(tp, "subpartition_name") || "-"))}</td>`;
@@ -5654,10 +5781,9 @@
 
       async function loadProfiles() {
         try {
-          const keys = getAPIKeys();
+          
           const resp = await fetch(`${API_BASE}/profiles`, {
             headers: {
-              "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
             },
           });
           if (handleSessionExpired(resp)) return;
@@ -5769,11 +5895,10 @@
         );
 
         try {
-          const keys = getAPIKeys();
+          
           const resp = await fetch(`${API_BASE}/connect-profile/${profileId}`, {
             method: "POST",
             headers: {
-              "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
             },
           });
           if (handleSessionExpired(resp)) return;
@@ -5832,11 +5957,10 @@
         if (!confirm(`Delete saved profile "${label}"?`)) return;
 
         try {
-          const keys = getAPIKeys();
+          
           const resp = await fetch(`${API_BASE}/profiles/${profileId}`, {
             method: "DELETE",
             headers: {
-              "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
             },
           });
           if (handleSessionExpired(resp)) return;
@@ -5918,12 +6042,11 @@
         };
 
         try {
-          const keys = getAPIKeys();
+          
           const resp = await fetch(`${API_BASE}/profiles`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-api-key": keys.api_key || "ChangeThisDefaultAPIKey123!",
             },
             body: JSON.stringify(profile),
           });
@@ -5951,3 +6074,4 @@
     </script>
   </body>
 </html>
+
