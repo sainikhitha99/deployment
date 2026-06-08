@@ -603,36 +603,23 @@ _ORACLE_LIVE_CACHE_MAX = 20  # max entries to prevent unbounded growth
 _inflight_lock = Lock()
 _inflight_ops: Dict[str, bool] = {}
 
-# API_KEY removed: MSAL session is the single source of truth.
-# Legacy defaults are intentionally commented out to avoid leaking secrets.
-# Derive APP_PASSWORD from environment if provided, otherwise fall back to
-# the Flask SECRET_KEY (development convenience). For production, set
-# DBA_APP_PASSWORD explicitly to the password used when encrypting profiles.
-APP_USERNAME = os.getenv('DBA_APP_USERNAME', 'admin')
-APP_PASSWORD = os.environ.get('DBA_APP_PASSWORD', 'DBAAssistant2026!') or os.environ.get('APP_PASSWORD') or SECRET_KEY
-
-# Warn if an encrypted profiles file exists but no explicit DBA_APP_PASSWORD
-# was supplied — decryption will fail unless the same password is provided.
-_profiles_enc_path = os.path.join(_BASE_DIR, "db_profiles.enc")
-print('mesg1-',os.environ.get('DBA_APP_PASSWORD')
-if os.path.exists(_profiles_enc_path) and not os.environ.get('DBA_APP_PASSWORD'):
-    logger.warning(
-        "DBA_APP_PASSWORD not set — existing encrypted profiles (%s) may be unreadable.\n"
-        "Set DBA_APP_PASSWORD to the password used when creating db_profiles.enc.",
-        _profiles_enc_path,
+# MSAL is the sole auth mechanism — no app username/password.
+# DBA_APP_PASSWORD must be set explicitly in the environment; there is no
+# hardcoded fallback so that a missing env var raises early rather than
+# silently producing the wrong decryption key and returning empty profiles.
+_profiles_enc_password = os.environ.get('DBA_APP_PASSWORD')
+if not _profiles_enc_password:
+    raise RuntimeError(
+        "DBA_APP_PASSWORD environment variable is not set. "
+        "Set it to the password used when the db_profiles.enc file was created."
     )
+
 MAX_ACTIVE_SESSIONS = 100  # cap to prevent unbounded memory growth
 active_sessions: Dict[str, Any] = {}  # token -> session info (no expiry)
 _sessions_lock = Lock()  # thread-safety for active_sessions
 
-# Login rate limiting to prevent brute-force attacks
-_LOGIN_MAX_ATTEMPTS = 5  # max failed attempts before lockout
-_LOGIN_LOCKOUT_SECONDS = 300  # 5-minute lockout
-_login_attempts: Dict[str, list] = {}  # IP/username -> [timestamps of failed attempts]
-_login_attempts_lock = Lock()
-
-# Encrypted DB connection profiles — key derived from APP_PASSWORD
-_profile_store = ProfileStore(master_password=APP_PASSWORD)
+# Encrypted DB connection profiles — key derived from DBA_APP_PASSWORD
+_profile_store = ProfileStore(master_password=_profiles_enc_password)
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -673,18 +660,10 @@ import threading as _threading
 
 
 def _background_cleanup_loop() -> None:
-    """Periodically purge stale login attempts and cap analysis result caches."""
+    """Periodically cap analysis result caches to prevent unbounded memory growth."""
     while True:
         time.sleep(300)  # 5 minutes
         try:
-            # Purge login attempts older than 2× lockout window
-            cutoff = time.time() - (_LOGIN_LOCKOUT_SECONDS * 2)
-            with _login_attempts_lock:
-                stale_keys = [k for k, ts_list in _login_attempts.items()
-                              if not ts_list or max(ts_list) < cutoff]
-                for k in stale_keys:
-                    del _login_attempts[k]
-
             # Cap analysis_results to last 50 entries (oldest by insertion order)
             if len(analysis_results) > 50:
                 excess = len(analysis_results) - 50
